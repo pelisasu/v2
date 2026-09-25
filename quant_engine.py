@@ -8,7 +8,7 @@ Upgrades Included:
 1. Multi-Timeframe Confluence (M30 & H4 Trend Alignment)
 2. London/New York Session Killzone Scoring Boost (+10% Confluence Bonus)
 3. Dynamic Stop-Loss, Breakeven (BE) Tracking & ATR Trailing Stop Mechanics
-4. Robust Market Data Ingestion via yfinance
+4. Robust Market Data Ingestion via yfinance with Price Offset Calibration
 =============================================================================
 """
 
@@ -33,11 +33,12 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 MIN_CONFLUENCE_SCORE = float(os.getenv("MIN_CONFLUENCE_SCORE", "75.0"))
 COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "60"))
 FORCE_RUN = os.getenv("FORCE_RUN", "false").lower() == "true"
+PRICE_OFFSET = 31.5  # Offset adjustment since Yahoo Finance GC=F is higher than spot XAUUSD
 CACHE_DIR = ".state_cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
 
 # =============================================================================
-# 1. ROBUST MARKET DATA PROVIDER (YAHOO FINANCE XAUUSD)
+# 1. ROBUST MARKET DATA PROVIDER (YAHOO FINANCE XAUUSD + OFFSET)
 # =============================================================================
 class MarketDataProvider:
     def __init__(self, ticker: str = "GC=F"):
@@ -49,7 +50,6 @@ class MarketDataProvider:
             df = yf.download(self.ticker, period=period, interval=interval, progress=False)
             
             if df.empty:
-                # Fallback to alternative ticker if GC=F fails
                 alt_ticker = "XAUUSD=X"
                 print(f"[DataProvider] Primary empty, trying fallback {alt_ticker}...")
                 df = yf.download(alt_ticker, period=period, interval=interval, progress=False)
@@ -57,15 +57,12 @@ class MarketDataProvider:
             if df.empty or len(df) < 20:
                 raise RuntimeError(f"Insufficient historical data retrieved for {self.ticker}")
 
-            # Clean MultiIndex columns if present in newer yfinance versions
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.droplevel(1)
 
             df = df.reset_index()
-            # Normalize column names
             df.columns = [str(c).lower() for c in df.columns]
             
-            # Map columns correctly
             col_mapping = {}
             for c in df.columns:
                 if 'date' in c or 'time' in c:
@@ -92,7 +89,12 @@ class MarketDataProvider:
                 df['volume'] = 1000.0
 
             df = df[required_cols + ['volume']].dropna()
-            return df, f"Yahoo Finance ({self.ticker})"
+
+            # Apply price offset calibration (Yahoo Finance is higher)
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = df[col] - PRICE_OFFSET
+
+            return df, f"Yahoo Finance ({self.ticker}) [Offset: -{PRICE_OFFSET}]"
         except Exception as e:
             raise RuntimeError(f"Failed to fetch market data: {e}")
 
@@ -297,7 +299,7 @@ def send_telegram_alert(payload: Dict[str, Any]) -> bool:
 
     msg = f"""⚡️ *XAUUSD INSTITUTIONAL QUANT SIGNAL* ⚡️
 ━━━━━━━━━━━━━━━━━━━━━━
-🎯 *PAIR:* `#XAUUSD` \\(Robust Feed\\)
+🎯 *PAIR:* `#XAUUSD` \\(Calibrated Feed\\)
 ⏱ *TIMEFRAME:* `M30` \\(H4 Trend Aligned\\)
 📊 *ACTION:* {icon} *{escape_md(action)}*
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -337,7 +339,7 @@ def main():
 
     try:
         df_m30, src_m30 = provider.get_gold_candles(interval="30m", period="5d")
-        df_h4, src_h4 = provider.get_gold_candles(interval="1h", period="10d") # Using 1h mapped proxy for H4 trend
+        df_h4, src_h4 = provider.get_gold_candles(interval="1h", period="10d")
         print(f"[Engine] Ingested M30 ({len(df_m30)} candles) from {src_m30}")
         print(f"[Engine] Ingested H4/Trend ({len(df_h4)} candles) from {src_h4}")
     except Exception as e:
@@ -348,7 +350,7 @@ def main():
     engine = InstitutionalQuantEngine(df_m30, df_h4, dxy_trend)
     res = engine.evaluate_all()
 
-    print(f"[Engine] Current Price: USD {res['current_price']:.2f}")
+    print(f"[Engine] Current Price (Calibrated): USD {res['current_price']:.2f}")
     print(f"[Engine] H4 Trend: {res['h4_trend']} | Killzone: {res['killzone_name']}")
     print(f"[Engine] Consensus: {res['consensus_direction']} with Score {res['confluence_score']}%")
 
