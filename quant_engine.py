@@ -5,7 +5,7 @@ DIRECTOR OF ARTIFICIAL SUPERINTELLIGENCE & SENIOR QUANT ENGINEER
 XAUUSD INSTITUTIONAL QUANT TRADING ENGINE (18 STRATEGY CONFLUENCE)
 =============================================================================
 Features:
-- Free Public Market Data prioritizing XAUUSD Spot (MT5 Accuracy)
+- Free Public Market Data with MT5 Price Alignment & Offset Correction
 - Auto-Failover & Multi-Provider Fallback (XAUUSD=X -> GC=F)
 - Anti-Spam & Anti-Loop (State caching, signal hash cooldown)
 - Complete 18-Strategy Multi-Timeframe Matrix (M30, H1, H4, D1)
@@ -40,14 +40,15 @@ CACHE_DIR = ".state_cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
 
 # =============================================================================
-# 1. ROBUST DATA INGESTION (PRIORITIZING XAUUSD SPOT FOR MT5 ACCURACY)
+# 1. ROBUST DATA INGESTION (WITH MT5 PRICE CORRECTION OFFSET)
 # =============================================================================
 class RobustMarketDataProvider:
-    def __init__(self):
-        pass
+    def __init__(self, price_offset: float = -41.5):
+        # Offset untuk menyamakan harga futures YF agar akurat dengan Spot MT5
+        self.price_offset = price_offset
 
     def get_gold_candles(self, timeframe: str = "30m") -> Tuple[pd.DataFrame, str]:
-        """Fetch gold data prioritizing XAUUSD Spot to match MT5 closely."""
+        """Fetch gold data and apply price offset adjustment for MT5 alignment."""
         symbols = ["XAUUSD=X", "GC=F"]
         
         for sym in symbols:
@@ -64,17 +65,20 @@ class RobustMarketDataProvider:
                     
                     time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
                     
+                    # Terapkan offset hanya jika menggunakan GC=F (Futures)
+                    offset_val = self.price_offset if "GC=F" in sym else 0.0
+                    
                     clean_df = pd.DataFrame({
                         "time": pd.to_datetime(df[time_col]),
-                        "open": pd.to_numeric(df['open'], errors='coerce'),
-                        "high": pd.to_numeric(df['high'], errors='coerce'),
-                        "low": pd.to_numeric(df['low'], errors='coerce'),
-                        "close": pd.to_numeric(df['close'], errors='coerce'),
+                        "open": pd.to_numeric(df['open'], errors='coerce') + offset_val,
+                        "high": pd.to_numeric(df['high'], errors='coerce') + offset_val,
+                        "low": pd.to_numeric(df['low'], errors='coerce') + offset_val,
+                        "close": pd.to_numeric(df['close'], errors='coerce') + offset_val,
                         "volume": pd.to_numeric(df.get('volume', 0), errors='coerce')
                     }).dropna()
 
                     if len(clean_df) >= 20:
-                        return clean_df, f"Yahoo Finance ({sym})"
+                        return clean_df, f"Yahoo Finance ({sym}) [Offset: {offset_val}]"
             except Exception as e:
                 print(f"[DataProvider] Failed for {sym}: {e}")
                 time.sleep(2)
@@ -395,7 +399,7 @@ def main():
     print(f"Timestamp UTC: {datetime.datetime.now(datetime.timezone.utc).isoformat()}")
     print("=" * 60)
 
-    provider = RobustMarketDataProvider()
+    provider = RobustMarketDataProvider(price_offset=-41.5)
     state_mgr = SignalStateManager(CACHE_FILE)
 
     try:
