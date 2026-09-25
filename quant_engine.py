@@ -5,8 +5,8 @@ DIRECTOR OF ARTIFICIAL SUPERINTELLIGENCE & SENIOR QUANT ENGINEER
 XAUUSD INSTITUTIONAL QUANT TRADING ENGINE (18 STRATEGY CONFLUENCE)
 =============================================================================
 Features:
-- Free Public Market Data with MT5 Accuracy (Yahoo GC=F, XAUUSD=X via yfinance)
-- Auto-Failover & Multi-Provider Fallback
+- Free Public Market Data prioritizing XAUUSD Spot (MT5 Accuracy)
+- Auto-Failover & Multi-Provider Fallback (XAUUSD=X -> GC=F)
 - Anti-Spam & Anti-Loop (State caching, signal hash cooldown)
 - Complete 18-Strategy Multi-Timeframe Matrix (M30, H1, H4, D1)
 - Rich Telegram Alert Dispatcher (MarkdownV2)
@@ -40,15 +40,15 @@ CACHE_DIR = ".state_cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
 
 # =============================================================================
-# 1. ROBUST DATA INGESTION (FREE & NO API KEY VIA YFINANCE)
+# 1. ROBUST DATA INGESTION (PRIORITIZING XAUUSD SPOT FOR MT5 ACCURACY)
 # =============================================================================
 class RobustMarketDataProvider:
     def __init__(self):
         pass
 
     def get_gold_candles(self, timeframe: str = "30m") -> Tuple[pd.DataFrame, str]:
-        """Fetch gold data using yfinance without API key."""
-        symbols = ["GC=F", "XAUUSD=X"]
+        """Fetch gold data prioritizing XAUUSD Spot to match MT5 closely."""
+        symbols = ["XAUUSD=X", "GC=F"]
         
         for sym in symbols:
             try:
