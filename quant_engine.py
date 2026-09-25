@@ -5,9 +5,8 @@ DIRECTOR OF ARTIFICIAL SUPERINTELLIGENCE & SENIOR QUANT ENGINEER
 XAUUSD INSTITUTIONAL QUANT TRADING ENGINE (18 STRATEGY CONFLUENCE)
 =============================================================================
 Features:
-- Free Public Market Data with MT5 Accuracy (Yahoo GC=F, XAUUSD=X, Binance PAXG proxy)
+- Free Public Market Data with MT5 Accuracy (Yahoo GC=F, XAUUSD=X via yfinance)
 - Auto-Failover & Multi-Provider Fallback
-- Anti-Geoblock (Rotating User-Agents & TLS headers)
 - Anti-Spam & Anti-Loop (State caching, signal hash cooldown)
 - Complete 18-Strategy Multi-Timeframe Matrix (M30, H1, H4, D1)
 - Rich Telegram Alert Dispatcher (MarkdownV2)
@@ -25,6 +24,7 @@ import requests
 import datetime
 import numpy as np
 import pandas as pd
+import yfinance as yf
 from typing import Dict, List, Optional, Tuple, Any
 
 # =============================================================================
@@ -39,114 +39,63 @@ FORCE_RUN = os.getenv("FORCE_RUN", "false").lower() == "true"
 CACHE_DIR = ".state_cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-]
-
 # =============================================================================
-# 1. ROBUST DATA INGESTION WITH AUTO-FAILOVER & ANTI-GEOBLOCK
+# 1. ROBUST DATA INGESTION (FREE & NO API KEY VIA YFINANCE)
 # =============================================================================
 class RobustMarketDataProvider:
     def __init__(self):
-        self.session = requests.Session()
-
-    def get_headers(self) -> Dict[str, str]:
-        return {
-            "User-Agent": random.choice(USER_AGENTS),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "DNT": "1",
-            "Connection": "keep-alive"
-        }
-
-    def fetch_yahoo(self, symbol: str, interval: str = "30m", range_period: str = "5d") -> Optional[pd.DataFrame]:
-        """Fetch OHLCV from Yahoo Finance API endpoint with retry."""
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={range_period}"
-        for attempt in range(3):
-            try:
-                resp = self.session.get(url, headers=self.get_headers(), timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    result = data.get("chart", {}).get("result", [])
-                    if not result:
-                        continue
-                    quote = result[0]["indicators"]["quote"][0]
-                    timestamps = result[0]["timestamp"]
-                    df = pd.DataFrame({
-                        "time": [datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc) for ts in timestamps],
-                        "open": quote.get("open", []),
-                        "high": quote.get("high", []),
-                        "low": quote.get("low", []),
-                        "close": quote.get("close", []),
-                        "volume": quote.get("volume", [0] * len(timestamps))
-                    }).dropna()
-                    if len(df) >= 20:
-                        return df
-            except Exception as e:
-                print(f"[DataProvider] Yahoo attempt {attempt+1} failed for {symbol}: {e}")
-                time.sleep(1 + attempt)
-        return None
-
-    def fetch_binance_proxy(self) -> Optional[pd.DataFrame]:
-        """PAXGUSDT provides real-time millisecond gold spot price backup."""
-        url = "https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=30m&limit=100"
-        try:
-            resp = self.session.get(url, headers=self.get_headers(), timeout=8)
-            if resp.status_code == 200:
-                raw = resp.json()
-                rows = []
-                for k in raw:
-                    rows.append({
-                        "time": datetime.datetime.fromtimestamp(k[0] / 1000, tz=datetime.timezone.utc),
-                        "open": float(k[1]),
-                        "high": float(k[2]),
-                        "low": float(k[3]),
-                        "close": float(k[4]),
-                        "volume": float(k[5])
-                    })
-                df = pd.DataFrame(rows)
-                if len(df) >= 20:
-                    return df
-        except Exception as e:
-            print(f"[DataProvider] Binance PAXG proxy error: {e}")
-        return None
+        pass
 
     def get_gold_candles(self, timeframe: str = "30m") -> Tuple[pd.DataFrame, str]:
-        """Auto-failover router across MT5-accurate sources."""
-        # 1. Primary: Gold Continuous Futures GC=F (Matches MT5 Comex gold ticks)
-        print("[DataProvider] Ingesting Primary Source: GC=F (Gold Futures)...")
-        df = self.fetch_yahoo("GC=F", interval=timeframe, range_period="5d")
-        if df is not None and not df.empty:
-            return df, "Yahoo Finance (GC=F Gold Spot/Futures)"
+        """Fetch gold data using yfinance without API key."""
+        symbols = ["GC=F", "XAUUSD=X"]
+        
+        for sym in symbols:
+            try:
+                print(f"[DataProvider] Trying to fetch {sym} via yfinance...")
+                df = yf.download(sym, period="5d", interval=timeframe, progress=False)
+                
+                if df is not None and not df.empty:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    
+                    df = df.reset_index()
+                    df.columns = [str(c).lower() for c in df.columns]
+                    
+                    time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
+                    
+                    clean_df = pd.DataFrame({
+                        "time": pd.to_datetime(df[time_col]),
+                        "open": pd.to_numeric(df['open'], errors='coerce'),
+                        "high": pd.to_numeric(df['high'], errors='coerce'),
+                        "low": pd.to_numeric(df['low'], errors='coerce'),
+                        "close": pd.to_numeric(df['close'], errors='coerce'),
+                        "volume": pd.to_numeric(df.get('volume', 0), errors='coerce')
+                    }).dropna()
 
-        # 2. Secondary: Spot Forex XAUUSD=X
-        print("[DataProvider] Failover to Secondary: XAUUSD=X Spot...")
-        df = self.fetch_yahoo("XAUUSD=X", interval=timeframe, range_period="5d")
-        if df is not None and not df.empty:
-            return df, "Yahoo Finance (XAUUSD=X Forex Spot)"
+                    if len(clean_df) >= 20:
+                        return clean_df, f"Yahoo Finance ({sym})"
+            except Exception as e:
+                print(f"[DataProvider] Failed for {sym}: {e}")
+                time.sleep(2)
 
-        # 3. Tertiary: Binance Gold Proxy (PAXGUSDT)
-        print("[DataProvider] Failover to Tertiary: PAXGUSDT Gold Proxy...")
-        df = self.fetch_binance_proxy()
-        if df is not None and not df.empty:
-            return df, "Binance PAXG/USDT (Gold Institutional Token)"
-
-        raise RuntimeError("All market data providers failed. Please check network connectivity.")
+        raise RuntimeError("All free market data providers failed. Please check network connectivity or GitHub Actions IP status.")
 
     def get_dxy_trend(self) -> str:
-        """Fetch US Dollar Index (DX-Y.NYB) to gauge macro correlation."""
+        """Fetch DXY trend for macro confirmation using yfinance."""
         try:
-            df = self.fetch_yahoo("DX-Y.NYB", interval="1d", range_period="5d")
-            if df is not None and len(df) >= 2:
-                last_close = df["close"].iloc[-1]
-                prev_close = df["close"].iloc[-2]
-                if last_close > prev_close * 1.0015:
-                    return "UP"
-                elif last_close < prev_close * 0.9985:
-                    return "DOWN"
+            df = yf.download("DX-Y.NYB", period="5d", interval="1d", progress=False)
+            if df is not None and not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                close_prices = df['Close'].dropna()
+                if len(close_prices) >= 2:
+                    last_close = close_prices.iloc[-1]
+                    prev_close = close_prices.iloc[-2]
+                    if last_close > prev_close * 1.0015:
+                        return "UP"
+                    elif last_close < prev_close * 0.9985:
+                        return "DOWN"
         except Exception:
             pass
         return "SIDEWAYS"
@@ -185,7 +134,6 @@ class InstitutionalQuantEngine:
         max_idx = np.argmax(hist)
         poc = (bin_edges[max_idx] + bin_edges[max_idx + 1]) / 2.0
         
-        # Value Area 70%
         target_vol = hist.sum() * 0.70
         sorted_indices = np.argsort(hist)[::-1]
         cum_vol = 0
@@ -213,7 +161,6 @@ class InstitutionalQuantEngine:
         current_rsi = rsi.iloc[-1]
         vp = self.calc_volume_profile()
 
-        # 1. SMC + Liquidity Sweep
         recent_highs = df["high"].iloc[-20:-2].max()
         recent_lows = df["low"].iloc[-20:-2].min()
         smc_dir = "NEUTRAL"
@@ -229,26 +176,19 @@ class InstitutionalQuantEngine:
             smc_conf = 92
             smc_desc = f"SSL Swept at {recent_lows:.2f} with buyer absorption"
 
-        # 2. Multi-Timeframe Order Flow + MSB (ChoCh)
         ema20 = df["close"].ewm(span=20).mean().iloc[-1]
         ema50 = df["close"].ewm(span=50).mean().iloc[-1]
         msb_dir = "BUY" if last_c > ema20 > ema50 else ("SELL" if last_c < ema20 < ema50 else "NEUTRAL")
 
-        # 3. Quantitative Mean Reversion + Volume Profile
         vp_dir = "BUY" if last_c < vp["val"] else ("SELL" if last_c > vp["vah"] else "NEUTRAL")
-
-        # 4. AI Sentiment Heuristic / Intermarket Risk-On Risk-Off
         ai_dir = "BUY" if self.dxy_trend == "DOWN" else ("SELL" if self.dxy_trend == "UP" else "NEUTRAL")
 
-        # 5. DRL Adaptive Policy (Sharpe Expectancy)
         drl_z = (last_c - vp["poc"]) / current_atr
         drl_dir = "BUY" if drl_z < -0.8 else ("SELL" if drl_z > 0.8 else "NEUTRAL")
 
-        # 6. ML Ensemble Gradient Probability
         ml_prob_buy = 0.5 + (0.15 if current_rsi < 45 else -0.15 if current_rsi > 55 else 0) + (0.15 if last_c < vp["poc"] else -0.15)
         ml_dir = "BUY" if ml_prob_buy > 0.58 else ("SELL" if ml_prob_buy < 0.42 else "NEUTRAL")
 
-        # 7. Pure Price Action (FVG & Order Block)
         fvg_dir = "NEUTRAL"
         if n >= 4:
             c1_h = df["high"].iloc[-3]
@@ -260,29 +200,19 @@ class InstitutionalQuantEngine:
             elif c3_h < c1_l:
                 fvg_dir = "SELL"
 
-        # 8. Statistical Arbitrage (Gold vs DXY Inverse Check)
         stat_dir = "BUY" if self.dxy_trend == "DOWN" else ("SELL" if self.dxy_trend == "UP" else "NEUTRAL")
-
-        # 9. Volatility Breakout (Bollinger Squeeze + ATR)
         std20 = df["close"].rolling(20).std().iloc[-1]
         vol_dir = "BUY" if last_c > ema20 and current_atr > 3.5 else ("SELL" if last_c < ema20 and current_atr > 3.5 else "NEUTRAL")
-
-        # 10. Order Flow & Tick Imbalance
         of_dir = "BUY" if last_c > last_o else "SELL"
-
-        # 11. MTF Momentum Divergence
         div_dir = "BUY" if current_rsi < 35 else ("SELL" if current_rsi > 65 else "NEUTRAL")
 
-        # 12. Session Killzones (UTC)
         utc_now = datetime.datetime.now(datetime.timezone.utc)
         hour = utc_now.hour
         in_killzone = (7 <= hour < 10) or (13 <= hour < 16)
         kz_name = "London Open" if (7 <= hour < 10) else ("New York Open" if (13 <= hour < 16) else "Off-Killzone")
 
-        # 13. HMM Regime
         regime = "BULLISH_TREND" if msb_dir == "BUY" and current_atr < 5 else ("BEARISH_TREND" if msb_dir == "SELL" else "MEAN_REVERTING")
 
-        # Compile consensus votes
         votes = [
             (smc_dir, 9.5),
             (msb_dir, 9.0),
@@ -426,7 +356,7 @@ def send_telegram_alert(signal_payload: Dict[str, Any]) -> bool:
 • DXY Sentinel: *{escape_md(dxy_trend)}*
 • Strict RRR Target: *1:3\\.2*
 
-📋 *MONEY MANAGEMENT / LOT SIZE \\(1\\.5% Risk\\):*
+📋 *MONEY MANAGEMENT / LOT SIZE \\(1\\.5\% Risk\\):*
 • $500 Account: `0.01 Lot`
 • $1,000 Account: `0.02 Lot`
 • $5,000 Account: `0.10 Lot`
