@@ -43,7 +43,7 @@ CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
 # 1. ROBUST DATA INGESTION (WITH MT5 PRICE CORRECTION OFFSET)
 # =============================================================================
 class RobustMarketDataProvider:
-    def __init__(self, price_offset: float = -41.5):
+    def __init__(self, price_offset: float = -30.5):
         # Offset untuk menyamakan harga futures YF agar akurat dengan Spot MT5
         self.price_offset = price_offset
 
