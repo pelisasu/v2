@@ -2,13 +2,13 @@
 """
 =============================================================================
 DIRECTOR OF ARTIFICIAL SUPERINTELLIGENCE & SENIOR QUANT ENGINEER
-XAUUSD INSTITUTIONAL QUANT TRADING ENGINE (DERIV WEBSOCKET FEED)
+XAUUSD INSTITUTIONAL QUANT TRADING ENGINE (YAHOO FINANCE ROBUST FEED)
 =============================================================================
 Upgrades Included:
-1. Multi-Timeframe Confluence (M30 & H4 Trend Alignment via Deriv API)
+1. Multi-Timeframe Confluence (M30 & H4 Trend Alignment)
 2. London/New York Session Killzone Scoring Boost (+10% Confluence Bonus)
 3. Dynamic Stop-Loss, Breakeven (BE) Tracking & ATR Trailing Stop Mechanics
-4. Real-time Public WebSocket Ingestion from Deriv (Automatic Symbol Fallback)
+4. Robust Market Data Ingestion via yfinance
 =============================================================================
 """
 
@@ -19,9 +19,9 @@ import time
 import math
 import datetime
 import requests
-import websocket
 import numpy as np
 import pandas as pd
+import yfinance as yf
 from typing import Dict, List, Optional, Tuple, Any
 
 # =============================================================================
@@ -36,82 +36,77 @@ FORCE_RUN = os.getenv("FORCE_RUN", "false").lower() == "true"
 CACHE_DIR = ".state_cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
 
-DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
-
 # =============================================================================
-# 1. DERIV PUBLIC WEBSOCKET DATA INGESTION (WITH AUTOMATIC SYMBOL FALLBACK)
+# 1. ROBUST MARKET DATA PROVIDER (YAHOO FINANCE XAUUSD)
 # =============================================================================
-class DerivMarketDataProvider:
-    def __init__(self, symbols: List[str] = ["gold", "frxXAUUSD", "XAUUSD"]):
-        self.symbols = symbols
+class MarketDataProvider:
+    def __init__(self, ticker: str = "GC=F"):
+        self.ticker = ticker
 
-    def _fetch_candles_sync(self, symbol: str, granularity_seconds: int, count: int = 100) -> pd.DataFrame:
-        raw_data = []
-
-        def on_message(ws, message):
-            nonlocal raw_data
-            try:
-                data = json.loads(message)
-                if data.get("msg_type") == "candles":
-                    raw_data = data.get("candles", [])
-                    ws.close()
-                elif data.get("msg_type") == "error":
-                    print(f"[Deriv Error for {symbol}] {data.get('error', {}).get('message')}")
-                    ws.close()
-            except Exception as e:
-                print(f"[Deriv WS Parse Error]: {e}")
-                ws.close()
-
-        def on_open(ws):
-            req = {
-                "ticks_history": symbol,
-                "adjust_start_time": 1,
-                "count": count,
-                "end": "latest",
-                "granularity": granularity_seconds,
-                "style": "candles"
-            }
-            ws.send(json.dumps(req))
-
-        ws_app = websocket.WebSocketApp(
-            DERIV_WS_URL,
-            on_open=on_open,
-            on_message=on_message
-        )
-        ws_app.run_forever(ping_interval=20, ping_timeout=10)
-
-        if not raw_data:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(raw_data)
-        df['time'] = pd.to_datetime(df['epoch'], unit='s')
-        for col in ['open', 'high', 'low', 'close']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        df['volume'] = 1000.0
-        return df[['time', 'open', 'high', 'low', 'close', 'volume']].dropna()
-
-    def get_gold_candles(self, timeframe: str = "30m") -> Tuple[pd.DataFrame, str]:
-        granularity_map = {
-            "30m": 1800,
-            "4h": 14400,
-            "1h": 3600
-        }
-        sec = granularity_map.get(timeframe, 1800)
-        
-        for sym in self.symbols:
-            print(f"[DerivProvider] Trying to fetch symbol '{sym}' for timeframe {timeframe}...")
-            try:
-                df = self._fetch_candles_sync(sym, granularity_seconds=sec, count=100)
-                if df is not None and len(df) >= 20:
-                    return df, f"Deriv Public API ({sym})"
-            except Exception as e:
-                print(f"[DerivProvider] Failed for {sym}: {e}")
-            time.sleep(1)
+    def get_gold_candles(self, interval: str = "30m", period: str = "5d") -> Tuple[pd.DataFrame, str]:
+        try:
+            print(f"[DataProvider] Fetching {self.ticker} for interval {interval}...")
+            df = yf.download(self.ticker, period=period, interval=interval, progress=False)
             
-        raise RuntimeError(f"Failed to fetch Deriv market data for timeframe {timeframe} across all symbol candidates.")
+            if df.empty:
+                # Fallback to alternative ticker if GC=F fails
+                alt_ticker = "XAUUSD=X"
+                print(f"[DataProvider] Primary empty, trying fallback {alt_ticker}...")
+                df = yf.download(alt_ticker, period=period, interval=interval, progress=False)
+
+            if df.empty or len(df) < 20:
+                raise RuntimeError(f"Insufficient historical data retrieved for {self.ticker}")
+
+            # Clean MultiIndex columns if present in newer yfinance versions
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+
+            df = df.reset_index()
+            # Normalize column names
+            df.columns = [str(c).lower() for c in df.columns]
+            
+            # Map columns correctly
+            col_mapping = {}
+            for c in df.columns:
+                if 'date' in c or 'time' in c:
+                    col_mapping[c] = 'time'
+                elif 'open' in c:
+                    col_mapping[c] = 'open'
+                elif 'high' in c:
+                    col_mapping[c] = 'high'
+                elif 'low' in c:
+                    col_mapping[c] = 'low'
+                elif 'close' in c:
+                    col_mapping[c] = 'close'
+                elif 'volume' in c:
+                    col_mapping[c] = 'volume'
+            
+            df = df.rename(columns=col_mapping)
+            
+            required_cols = ['time', 'open', 'high', 'low', 'close']
+            for rc in required_cols:
+                if rc not in df.columns:
+                    raise KeyError(f"Missing required column '{rc}' in dataframe.")
+
+            if 'volume' not in df.columns:
+                df['volume'] = 1000.0
+
+            df = df[required_cols + ['volume']].dropna()
+            return df, f"Yahoo Finance ({self.ticker})"
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch market data: {e}")
 
     def get_dxy_trend(self) -> str:
+        try:
+            df_dxy = yf.download("DX-Y.NYB", period="5d", interval="1d", progress=False)
+            if not df_dxy.empty:
+                if isinstance(df_dxy.columns, pd.MultiIndex):
+                    df_dxy.columns = df_dxy.columns.droplevel(1)
+                closes = df_dxy['Close'] if 'Close' in df_dxy.columns else df_dxy['close']
+                if len(closes) >= 2:
+                    return "UP" if closes.iloc[-1] > closes.iloc[-2] else "DOWN"
+        except Exception:
+            pass
         return "SIDEWAYS"
 
 # =============================================================================
@@ -162,7 +157,6 @@ class InstitutionalQuantEngine:
         current_rsi = rsi.iloc[-1]
 
         # Volume Profile calculation
-        min_p, max_p = df["low"].min(), df["high"].max()
         hist, bin_edges = np.histogram(df["close"], bins=25, weights=df["volume"] + 1)
         poc = (bin_edges[np.argmax(hist)] + bin_edges[np.argmax(hist) + 1]) / 2.0
         target_vol = hist.sum() * 0.70
@@ -301,9 +295,9 @@ def send_telegram_alert(payload: Dict[str, Any]) -> bool:
     icon = "🟢" if payload["direction"] == "BUY" else "🔴"
     action = "STRONG BUY" if payload["direction"] == "BUY" else "STRONG SELL"
 
-    msg = f"""⚡️ *XAUUSD DERIV QUANT SIGNAL* ⚡️
+    msg = f"""⚡️ *XAUUSD INSTITUTIONAL QUANT SIGNAL* ⚡️
 ━━━━━━━━━━━━━━━━━━━━━━
-🎯 *PAIR:* `#XAUUSD` \\(Deriv Feed\\)
+🎯 *PAIR:* `#XAUUSD` \\(Robust Feed\\)
 ⏱ *TIMEFRAME:* `M30` \\(H4 Trend Aligned\\)
 📊 *ACTION:* {icon} *{escape_md(action)}*
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -320,7 +314,7 @@ def send_telegram_alert(payload: Dict[str, Any]) -> bool:
 • H4 Trend Filter: *{escape_md(payload['h4_trend'])}*
 • Regime: *{escape_md(payload['regime'])}*
 ━━━━━━━━━━━━━━━━━━━━━━
-🤖 *Automated Deriv WebSocket Engine*"""
+🤖 *Automated Quant Engine*"""
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
@@ -334,18 +328,18 @@ def send_telegram_alert(payload: Dict[str, Any]) -> bool:
 # =============================================================================
 def main():
     print("=" * 60)
-    print("XAUUSD DERIV INSTITUTIONAL QUANT ENGINE STARTED")
+    print("XAUUSD INSTITUTIONAL QUANT ENGINE STARTED")
     print(f"Timestamp UTC: {datetime.datetime.now(datetime.timezone.utc).isoformat()}")
     print("=" * 60)
 
-    provider = DerivMarketDataProvider()
+    provider = MarketDataProvider()
     state_mgr = SignalStateManager(CACHE_FILE)
 
     try:
-        df_m30, src_m30 = provider.get_gold_candles(timeframe="30m")
-        df_h4, src_h4 = provider.get_gold_candles(timeframe="4h")
+        df_m30, src_m30 = provider.get_gold_candles(interval="30m", period="5d")
+        df_h4, src_h4 = provider.get_gold_candles(interval="1h", period="10d") # Using 1h mapped proxy for H4 trend
         print(f"[Engine] Ingested M30 ({len(df_m30)} candles) from {src_m30}")
-        print(f"[Engine] Ingested H4 ({len(df_h4)} candles) from {src_h4}")
+        print(f"[Engine] Ingested H4/Trend ({len(df_h4)} candles) from {src_h4}")
     except Exception as e:
         print(f"[Engine FATAL] Market data failure: {e}")
         sys.exit(0)
@@ -393,7 +387,7 @@ def main():
 
     if send_telegram_alert(signal_payload):
         state_mgr.save_signal(direction, entry, score)
-        print("[Engine] Deriv institutional signal dispatched successfully!")
+        print("[Engine] Institutional signal dispatched successfully!")
 
     print("[Engine] Execution cycle completed cleanly.")
 
