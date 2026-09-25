@@ -2,13 +2,13 @@
 """
 =============================================================================
 DIRECTOR OF ARTIFICIAL SUPERINTELLIGENCE & SENIOR QUANT ENGINEER
-XAUUSD INSTITUTIONAL QUANT TRADING ENGINE (18 STRATEGY CONFLUENCE + ADVANCED UPGRADES)
+XAUUSD INSTITUTIONAL QUANT TRADING ENGINE (DERIV WEBSOCKET FEED)
 =============================================================================
 Upgrades Included:
-1. Multi-Timeframe Confluence (M30 & H4 Trend Alignment)
+1. Multi-Timeframe Confluence (M30 & H4 Trend Alignment via Deriv API)
 2. London/New York Session Killzone Scoring Boost (+10% Confluence Bonus)
 3. Dynamic Stop-Loss, Breakeven (BE) Tracking & ATR Trailing Stop Mechanics
-4. MT5 Price Alignment & Robust Offset Correction (-30.5)
+4. Real-time Public WebSocket Ingestion from Deriv (frxXAUUSD)
 =============================================================================
 """
 
@@ -17,13 +17,11 @@ import sys
 import json
 import time
 import math
-import random
-import hashlib
-import requests
 import datetime
+import requests
+import websocket
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from typing import Dict, List, Optional, Tuple, Any
 
 # =============================================================================
@@ -38,61 +36,84 @@ FORCE_RUN = os.getenv("FORCE_RUN", "false").lower() == "true"
 CACHE_DIR = ".state_cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
 
+DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+
 # =============================================================================
-# 1. ROBUST DATA INGESTION (WITH MT5 PRICE CORRECTION OFFSET)
+# 1. DERIV PUBLIC WEBSOCKET DATA INGESTION
 # =============================================================================
-class RobustMarketDataProvider:
-    def __init__(self, price_offset: float = -31.5):
-        self.price_offset = price_offset
+class DerivMarketDataProvider:
+    def __init__(self, symbol: str = "frxXAUUSD"):
+        self.symbol = symbol
+
+    def _fetch_candles_sync(self, granularity_seconds: int, count: int = 100) -> pd.DataFrame:
+        """Mengambil data historical candles via Deriv WebSocket API secara sinkron."""
+        raw_data = []
+
+        def on_message(ws, message):
+            nonlocal raw_data
+            try:
+                data = json.loads(message)
+                if data.get("msg_type") == "candles":
+                    raw_data = data.get("candles", [])
+                    ws.close()
+                elif data.get("msg_type") == "error":
+                    print(f"[Deriv Error] {data.get('error', {}).get('message')}")
+                    ws.close()
+            except Exception as e:
+                print(f"[Deriv WS Parse Error]: {e}")
+                ws.close()
+
+        def on_open(ws):
+            req = {
+                "ticks_history": self.symbol,
+                "adjust_start_time": 1,
+                "count": count,
+                "end": "latest",
+                "granularity": granularity_seconds,
+                "style": "candles"
+            }
+            ws.send(json.dumps(req))
+
+        ws_app = websocket.WebSocketApp(
+            DERIV_WS_URL,
+            on_open=on_open,
+            on_message=on_message
+        )
+        ws_app.run_forever(ping_interval=20, ping_timeout=10)
+
+        if not raw_data:
+            raise RuntimeError(f"Gagal menarik data candles untuk {self.symbol} dengan granularity {granularity_seconds}")
+
+        df = pd.DataFrame(raw_data)
+        # Format kolom dari API Deriv: epoch, open, high, low, close
+        df['time'] = pd.to_datetime(df['epoch'], unit='s')
+        for col in ['open', 'high', 'low', 'close']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        df['volume'] = 1000.0 # Deriv public feed biasanya menggunakan volume sintetis/default
+        return df[['time', 'open', 'high', 'low', 'close', 'volume']].dropna()
 
     def get_gold_candles(self, timeframe: str = "30m") -> Tuple[pd.DataFrame, str]:
-        symbols = ["XAUUSD=X", "GC=F"]
-        for sym in symbols:
-            try:
-                print(f"[DataProvider] Trying to fetch {sym} ({timeframe}) via yfinance...")
-                period_str = "60d" if timeframe in ["4h", "1h"] else "5d"
-                df = yf.download(sym, period=period_str, interval=timeframe, progress=False)
-                
-                if df is not None and not df.empty:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-                    
-                    df = df.reset_index()
-                    df.columns = [str(c).lower() for c in df.columns]
-                    time_col = 'datetime' if 'datetime' in df.columns else ('date' if 'date' in df.columns else df.columns[0])
-                    
-                    offset_val = self.price_offset if "GC=F" in sym else 0.0
-                    
-                    clean_df = pd.DataFrame({
-                        "time": pd.to_datetime(df[time_col]),
-                        "open": pd.to_numeric(df['open'], errors='coerce') + offset_val,
-                        "high": pd.to_numeric(df['high'], errors='coerce') + offset_val,
-                        "low": pd.to_numeric(df['low'], errors='coerce') + offset_val,
-                        "close": pd.to_numeric(df['close'], errors='coerce') + offset_val,
-                        "volume": pd.to_numeric(df.get('volume', 0), errors='coerce')
-                    }).dropna()
-
-                    if len(clean_df) >= 20:
-                        return clean_df, f"Yahoo Finance ({sym}) [Offset: {offset_val}]"
-            except Exception as e:
-                print(f"[DataProvider] Failed for {sym} at {timeframe}: {e}")
-                time.sleep(2)
-        raise RuntimeError(f"Failed to fetch market data for timeframe {timeframe}")
+        # Deriv granularity dalam detik: 30m = 1800, 4h = 14400
+        granularity_map = {
+            "30m": 1800,
+            "4h": 14400,
+            "1h": 3600
+        }
+        sec = granularity_map.get(timeframe, 1800)
+        print(f"[DerivProvider] Fetching {self.symbol} for timeframe {timeframe}...")
+        
+        try:
+            df = self._fetch_candles_sync(granularity_seconds=sec, count=100)
+            if len(df) >= 20:
+                return df, f"Deriv Public API ({self.symbol})"
+        except Exception as e:
+            print(f"[DerivProvider] Error fetching {timeframe}: {e}")
+            
+        raise RuntimeError(f"Failed to fetch Deriv market data for timeframe {timeframe}")
 
     def get_dxy_trend(self) -> str:
-        try:
-            df = yf.download("DX-Y.NYB", period="5d", interval="1d", progress=False)
-            if df is not None and not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                close_prices = df['Close'].dropna()
-                if len(close_prices) >= 2:
-                    if close_prices.iloc[-1] > close_prices.iloc[-2] * 1.0015:
-                        return "UP"
-                    elif close_prices.iloc[-1] < close_prices.iloc[-2] * 0.9985:
-                        return "DOWN"
-        except Exception:
-            pass
+        # Karena DXY tidak ada di Deriv Forex standar, dikembalikan SIDEWAYS atau bisa disesuaikan
         return "SIDEWAYS"
 
 # =============================================================================
@@ -167,7 +188,7 @@ class InstitutionalQuantEngine:
             smc_dir = "BUY"
 
         msb_dir = self.get_trend_direction(df)
-        h4_trend = self.get_trend_direction(self.df_h4) # FEATURE 1: H4 Multi-Timeframe Trend
+        h4_trend = self.get_trend_direction(self.df_h4)
 
         vp_dir = "BUY" if last_c < vp["val"] else ("SELL" if last_c > vp["vah"] else "NEUTRAL")
         ai_dir = "BUY" if self.dxy_trend == "DOWN" else ("SELL" if self.dxy_trend == "UP" else "NEUTRAL")
@@ -186,7 +207,7 @@ class InstitutionalQuantEngine:
         of_dir = "BUY" if last_c > last_o else "SELL"
         div_dir = "BUY" if current_rsi < 35 else ("SELL" if current_rsi > 65 else "NEUTRAL")
 
-        # FEATURE 2: Killzone Session & Scoring Bonus
+        # Killzone Session & Scoring Bonus
         utc_now = datetime.datetime.now(datetime.timezone.utc)
         hour = utc_now.hour
         is_london = 7 <= hour < 10
@@ -201,7 +222,7 @@ class InstitutionalQuantEngine:
             (smc_dir, 9.5), (msb_dir, 9.0), (vp_dir, 8.5), (ai_dir, 8.0),
             (drl_dir, 7.5), (ml_dir, 8.0), (fvg_dir, 9.0), (ai_dir, 8.0),
             (vol_dir, 7.0), (of_dir, 7.5), (div_dir, 7.5), (msb_dir, 8.5),
-            (h4_trend, 12.0), # Heavy weight for H4 macro alignment
+            (h4_trend, 12.0),
             (msb_dir, 7.0), (ai_dir, 7.5), (ai_dir, 8.0), (of_dir, 8.0),
             ("BUY" if last_c > vp["poc"] else "SELL", 9.0)
         ]
@@ -216,7 +237,6 @@ class InstitutionalQuantEngine:
         consensus_dir = "NEUTRAL"
         final_score = 0.0
 
-        # FEATURE 1 Enforcement: M30 must align with H4 to trigger high confluence
         if buy_pct >= 65 and buy_pct > sell_pct and (h4_trend == "BUY" or h4_trend == "NEUTRAL"):
             consensus_dir = "BUY"
             final_score = min(round(buy_pct, 1), 100.0)
@@ -268,7 +288,7 @@ class SignalStateManager:
             print(f"[State] Cache error: {e}")
 
 # =============================================================================
-# 4. TELEGRAM DISPATCHER (MARKDOWNV2 WITH TRAILING STOP RULES)
+# 4. TELEGRAM DISPATCHER
 # =============================================================================
 def escape_md(text: Any) -> str:
     s = str(text)
@@ -283,9 +303,9 @@ def send_telegram_alert(payload: Dict[str, Any]) -> bool:
     icon = "🟢" if payload["direction"] == "BUY" else "🔴"
     action = "STRONG BUY" if payload["direction"] == "BUY" else "STRONG SELL"
 
-    msg = f"""⚡️ *XAUUSD INSTITUTIONAL QUANT SIGNAL* ⚡️
+    msg = f"""⚡️ *XAUUSD DERIV QUANT SIGNAL* ⚡️
 ━━━━━━━━━━━━━━━━━━━━━━
-🎯 *PAIR:* `#XAUUSD` \\(GOLD\\)
+🎯 *PAIR:* `#XAUUSD` \\(Deriv frxXAUUSD\\)
 ⏱ *TIMEFRAME:* `M30` \\(H4 Trend Aligned\\)
 📊 *ACTION:* {icon} *{escape_md(action)}*
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -296,17 +316,13 @@ def send_telegram_alert(payload: Dict[str, Any]) -> bool:
 🎯 *TP 2:* `{escape_md(f"{payload['tp2']:.2f}")}` \\(R:R 1:3\\.2\\)
 🎯 *TP 3:* `{escape_md(f"{payload['tp3']:.2f}")}` \\(ATR Trailing Runner\\)
 ━━━━━━━━━━━━━━━━━━━━━━
-🧠 *QUANT & H4 MATRIX:*
+🧠 *QUANT MATRIX:*
 • Confluence Score: *{escape_md(payload['score'])}%*
-• Session: *{escape_md(payload['killzone'])}* \\(+10\% Bonus Active\\)
+• Session: *{escape_md(payload['killzone'])}* \\(+10\% Bonus\\)
 • H4 Trend Filter: *{escape_md(payload['h4_trend'])}*
 • Regime: *{escape_md(payload['regime'])}*
-
-🔄 *DYNAMIC BE & TRAILING STOP PROTOCOL:*
-1\\. Geser SL ke *Breakeven \\(BE\\)* otomatis setelah TP1 tersentuh\\.
-2\\. Gunakan ATR Trail \\(Step `{escape_md(payload['atr_step'])}` Pips\\) untuk TP3 Runner\\.
 ━━━━━━━━━━━━━━━━━━━━━━
-🤖 *Automated GitHub Actions Quant Engine*"""
+🤖 *Automated Deriv WebSocket Engine*"""
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
@@ -320,11 +336,11 @@ def send_telegram_alert(payload: Dict[str, Any]) -> bool:
 # =============================================================================
 def main():
     print("=" * 60)
-    print("XAUUSD INSTITUTIONAL QUANT ENGINE STARTED (UPGRADED)")
+    print("XAUUSD DERIV INSTITUTIONAL QUANT ENGINE STARTED")
     print(f"Timestamp UTC: {datetime.datetime.now(datetime.timezone.utc).isoformat()}")
     print("=" * 60)
 
-    provider = RobustMarketDataProvider(price_offset=-31.5)
+    provider = DerivMarketDataProvider(symbol="frxXAUUSD")
     state_mgr = SignalStateManager(CACHE_FILE)
 
     try:
@@ -342,7 +358,7 @@ def main():
 
     print(f"[Engine] Current Price: USD {res['current_price']:.2f}")
     print(f"[Engine] H4 Trend: {res['h4_trend']} | Killzone: {res['killzone_name']}")
-    print(f"[Engine] Consensus: {res['consensus_direction']} with Score {res['confluence_score']}% (Min required: {MIN_CONFLUENCE_SCORE}%)")
+    print(f"[Engine] Consensus: {res['consensus_direction']} with Score {res['confluence_score']}%")
 
     direction = res["consensus_direction"]
     score = res["confluence_score"]
@@ -379,7 +395,7 @@ def main():
 
     if send_telegram_alert(signal_payload):
         state_mgr.save_signal(direction, entry, score)
-        print("[Engine] Upgraded institutional signal dispatched successfully!")
+        print("[Engine] Deriv institutional signal dispatched successfully!")
 
     print("[Engine] Execution cycle completed cleanly.")
 
