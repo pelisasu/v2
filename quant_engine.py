@@ -324,7 +324,7 @@ def main():
     print(f"Timestamp UTC: {datetime.datetime.now(datetime.timezone.utc).isoformat()}")
     print("=" * 60)
 
-    provider = RobustMarketDataProvider(price_offset=-30.5)
+    provider = RobustMarketDataProvider(price_offset=-31.5)
     state_mgr = SignalStateManager(CACHE_FILE)
 
     try:
