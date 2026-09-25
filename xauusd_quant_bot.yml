@@ -1,0 +1,67 @@
+# .github/workflows/xauusd_quant_bot.yml
+# Institutional XAUUSD Quant Trading Signal Bot
+# Runs every 15 minutes during Forex market hours (Mon-Fri)
+
+name: XAUUSD Quant Institutional Signal Engine
+
+on:
+  schedule:
+    # Run every 15 minutes from Monday 00:00 UTC through Friday 22:00 UTC
+    - cron: '*/15 * * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Force scan even outside killzones or duplicate cooldown'
+        required: false
+        default: 'false'
+        type: boolean
+
+concurrency:
+  group: xauusd-quant-bot
+  cancel-in-progress: false
+
+jobs:
+  scan-and-alert:
+    name: Execute 18-Strategy Confluence Scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Quant Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore Signal Deduplication State
+        uses: actions/cache@v4
+        with:
+          path: .state_cache/
+          key: quant-state-${{ github.run_id }}
+          restore-keys: |
+            quant-state-
+
+      - name: Run Institutional Quant Engine
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FORCE_RUN: ${{ github.event.inputs.force_run || 'false' }}
+        run: |
+          mkdir -p .state_cache
+          python quant_engine.py
+
+      - name: Save Signal State Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state_cache/
+          key: quant-state-${{ github.run_id }}
