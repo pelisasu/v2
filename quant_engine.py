@@ -44,7 +44,7 @@ CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
 # =============================================================================
 class RobustMarketDataProvider:
     def __init__(self, price_offset: float = -30.5):
-        # Offset untuk menyamakan harga futures YF agar akurat dengan Spot MT5
+        # Offset diubah langsung ke -30.5 agar sinkron dengan MT5
         self.price_offset = price_offset
 
     def get_gold_candles(self, timeframe: str = "30m") -> Tuple[pd.DataFrame, str]:
@@ -399,7 +399,7 @@ def main():
     print(f"Timestamp UTC: {datetime.datetime.now(datetime.timezone.utc).isoformat()}")
     print("=" * 60)
 
-    provider = RobustMarketDataProvider(price_offset=-41.5)
+    provider = RobustMarketDataProvider()
     state_mgr = SignalStateManager(CACHE_FILE)
 
     try:
