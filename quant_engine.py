@@ -8,7 +8,7 @@ Upgrades Included:
 1. Multi-Timeframe Confluence (M30 & H4 Trend Alignment via Deriv API)
 2. London/New York Session Killzone Scoring Boost (+10% Confluence Bonus)
 3. Dynamic Stop-Loss, Breakeven (BE) Tracking & ATR Trailing Stop Mechanics
-4. Real-time Public WebSocket Ingestion from Deriv (frxXAUUSD)
+4. Real-time Public WebSocket Ingestion from Deriv (Automatic Symbol Fallback)
 =============================================================================
 """
 
@@ -39,14 +39,13 @@ CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
 # =============================================================================
-# 1. DERIV PUBLIC WEBSOCKET DATA INGESTION
+# 1. DERIV PUBLIC WEBSOCKET DATA INGESTION (WITH AUTOMATIC SYMBOL FALLBACK)
 # =============================================================================
 class DerivMarketDataProvider:
-    def __init__(self, symbol: str = "frxXAUUSD"):
-        self.symbol = symbol
+    def __init__(self, symbols: List[str] = ["gold", "frxXAUUSD", "XAUUSD"]):
+        self.symbols = symbols
 
-    def _fetch_candles_sync(self, granularity_seconds: int, count: int = 100) -> pd.DataFrame:
-        """Mengambil data historical candles via Deriv WebSocket API secara sinkron."""
+    def _fetch_candles_sync(self, symbol: str, granularity_seconds: int, count: int = 100) -> pd.DataFrame:
         raw_data = []
 
         def on_message(ws, message):
@@ -57,7 +56,7 @@ class DerivMarketDataProvider:
                     raw_data = data.get("candles", [])
                     ws.close()
                 elif data.get("msg_type") == "error":
-                    print(f"[Deriv Error] {data.get('error', {}).get('message')}")
+                    print(f"[Deriv Error for {symbol}] {data.get('error', {}).get('message')}")
                     ws.close()
             except Exception as e:
                 print(f"[Deriv WS Parse Error]: {e}")
@@ -65,7 +64,7 @@ class DerivMarketDataProvider:
 
         def on_open(ws):
             req = {
-                "ticks_history": self.symbol,
+                "ticks_history": symbol,
                 "adjust_start_time": 1,
                 "count": count,
                 "end": "latest",
@@ -82,38 +81,37 @@ class DerivMarketDataProvider:
         ws_app.run_forever(ping_interval=20, ping_timeout=10)
 
         if not raw_data:
-            raise RuntimeError(f"Gagal menarik data candles untuk {self.symbol} dengan granularity {granularity_seconds}")
+            return pd.DataFrame()
 
         df = pd.DataFrame(raw_data)
-        # Format kolom dari API Deriv: epoch, open, high, low, close
         df['time'] = pd.to_datetime(df['epoch'], unit='s')
         for col in ['open', 'high', 'low', 'close']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        df['volume'] = 1000.0 # Deriv public feed biasanya menggunakan volume sintetis/default
+        df['volume'] = 1000.0
         return df[['time', 'open', 'high', 'low', 'close', 'volume']].dropna()
 
     def get_gold_candles(self, timeframe: str = "30m") -> Tuple[pd.DataFrame, str]:
-        # Deriv granularity dalam detik: 30m = 1800, 4h = 14400
         granularity_map = {
             "30m": 1800,
             "4h": 14400,
             "1h": 3600
         }
         sec = granularity_map.get(timeframe, 1800)
-        print(f"[DerivProvider] Fetching {self.symbol} for timeframe {timeframe}...")
         
-        try:
-            df = self._fetch_candles_sync(granularity_seconds=sec, count=100)
-            if len(df) >= 20:
-                return df, f"Deriv Public API ({self.symbol})"
-        except Exception as e:
-            print(f"[DerivProvider] Error fetching {timeframe}: {e}")
+        for sym in self.symbols:
+            print(f"[DerivProvider] Trying to fetch symbol '{sym}' for timeframe {timeframe}...")
+            try:
+                df = self._fetch_candles_sync(sym, granularity_seconds=sec, count=100)
+                if df is not None and len(df) >= 20:
+                    return df, f"Deriv Public API ({sym})"
+            except Exception as e:
+                print(f"[DerivProvider] Failed for {sym}: {e}")
+            time.sleep(1)
             
-        raise RuntimeError(f"Failed to fetch Deriv market data for timeframe {timeframe}")
+        raise RuntimeError(f"Failed to fetch Deriv market data for timeframe {timeframe} across all symbol candidates.")
 
     def get_dxy_trend(self) -> str:
-        # Karena DXY tidak ada di Deriv Forex standar, dikembalikan SIDEWAYS atau bisa disesuaikan
         return "SIDEWAYS"
 
 # =============================================================================
@@ -305,7 +303,7 @@ def send_telegram_alert(payload: Dict[str, Any]) -> bool:
 
     msg = f"""⚡️ *XAUUSD DERIV QUANT SIGNAL* ⚡️
 ━━━━━━━━━━━━━━━━━━━━━━
-🎯 *PAIR:* `#XAUUSD` \\(Deriv frxXAUUSD\\)
+🎯 *PAIR:* `#XAUUSD` \\(Deriv Feed\\)
 ⏱ *TIMEFRAME:* `M30` \\(H4 Trend Aligned\\)
 📊 *ACTION:* {icon} *{escape_md(action)}*
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -340,7 +338,7 @@ def main():
     print(f"Timestamp UTC: {datetime.datetime.now(datetime.timezone.utc).isoformat()}")
     print("=" * 60)
 
-    provider = DerivMarketDataProvider(symbol="frxXAUUSD")
+    provider = DerivMarketDataProvider()
     state_mgr = SignalStateManager(CACHE_FILE)
 
     try:
