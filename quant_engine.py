@@ -35,9 +35,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 MIN_CONFLUENCE_SCORE = float(os.getenv("MIN_CONFLUENCE_SCORE", "75.0"))
 COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "60"))
 FORCE_RUN = os.getenv("FORCE_RUN", "false").lower() == "true"
-PRICE_OFFSET = (
-    31.5  # Offset adjustment since Yahoo Finance GC=F is higher than spot XAUUSD
-)
+PRICE_OFFSET = 31.5  # Offset adjustment since Yahoo Finance GC=F is higher than spot XAUUSD
 
 CACHE_DIR = ".state_cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "last_signal_state.json")
@@ -55,18 +53,14 @@ class MarketDataProvider:
         self, interval: str = "30m", period: str = "5d"
     ) -> Tuple[pd.DataFrame, str]:
         try:
-            print(
-                f"[DataProvider] Fetching {self.ticker} for interval {interval}..."
-            )
+            print(f"[DataProvider] Fetching {self.ticker} for interval {interval}...")
             df = yf.download(
                 self.ticker, period=period, interval=interval, progress=False
             )
 
             if df.empty:
                 alt_ticker = "XAUUSD=X"
-                print(
-                    f"[DataProvider] Primary empty, trying fallback {alt_ticker}..."
-                )
+                print(f"[DataProvider] Primary empty, trying fallback {alt_ticker}...")
                 df = yf.download(
                     alt_ticker, period=period, interval=interval, progress=False
                 )
@@ -102,9 +96,7 @@ class MarketDataProvider:
             required_cols = ["time", "open", "high", "low", "close"]
             for rc in required_cols:
                 if rc not in df.columns:
-                    raise KeyError(
-                        f"Missing required column '{rc}' in dataframe."
-                    )
+                    raise KeyError(f"Missing required column '{rc}' in dataframe.")
 
             if "volume" not in df.columns:
                 df["volume"] = 1000.0
@@ -133,9 +125,7 @@ class MarketDataProvider:
                     else df_dxy["close"]
                 )
                 if len(closes) >= 2:
-                    return (
-                        "UP" if closes.iloc[-1] > closes.iloc[-2] else "DOWN"
-                    )
+                    return "UP" if closes.iloc[-1] > closes.iloc[-2] else "DOWN"
         except Exception:
             pass
         return "SIDEWAYS"
@@ -188,9 +178,7 @@ class InstitutionalQuantEngine:
 
         rsi = self.calc_rsi(df)
         atr = self.calc_atr(df)
-        current_atr = (
-            atr.iloc[-1] if not math.isnan(atr.iloc[-1]) else 3.5
-        )
+        current_atr = atr.iloc[-1] if not math.isnan(atr.iloc[-1]) else 3.5
         current_rsi = rsi.iloc[-1]
 
         # Volume Profile calculation
@@ -258,11 +246,7 @@ class InstitutionalQuantEngine:
         vol_dir = (
             "BUY"
             if last_c > ema20 and current_atr > 3.5
-            else (
-                "SELL"
-                if last_c < ema20 and current_atr > 3.5
-                else "NEUTRAL"
-            )
+            else ("SELL" if last_c < ema20 and current_atr > 3.5 else "NEUTRAL")
         )
         of_dir = "BUY" if last_c > last_o else "SELL"
         div_dir = (
@@ -358,9 +342,7 @@ class InstitutionalQuantEngine:
 # =============================================================================
 # 3. GEMINI AGI BRAIN GATEKEEPER
 # =============================================================================
-def ask_gemini_brain(
-    payload: Dict[str, Any], api_key: str
-) -> Tuple[str, str]:
+def ask_gemini_brain(payload: Dict[str, Any], api_key: str) -> Tuple[str, str]:
     """Mengevaluasi keputusan trading menggunakan LLM Gemini 1.5 Flash."""
     if not api_key:
         print("[AGI Brain] API Key tidak tersedia. Bypassing AI filter.")
@@ -485,7 +467,7 @@ def escape_md(text: Any) -> str:
         "=",
         "|",
         "{",
-        "}",,
+        "}",
         ".",
         "!",
     ]:
@@ -556,12 +538,8 @@ def main():
     state_mgr = SignalStateManager(CACHE_FILE)
 
     try:
-        df_m30, src_m30 = provider.get_gold_candles(
-            interval="30m", period="5d"
-        )
-        df_h4, src_h4 = provider.get_gold_candles(
-            interval="1h", period="10d"
-        )
+        df_m30, src_m30 = provider.get_gold_candles(interval="30m", period="5d")
+        df_h4, src_h4 = provider.get_gold_candles(interval="1h", period="10d")
         print(f"[Engine] Ingested M30 ({len(df_m30)} candles) from {src_m30}")
         print(f"[Engine] Ingested H4/Trend ({len(df_h4)} candles) from {src_h4}")
     except Exception as e:
