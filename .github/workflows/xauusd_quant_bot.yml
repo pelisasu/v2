@@ -2,9 +2,9 @@ name: XAUUSD AGI Quant Trading Bot
 
 on:
   schedule:
-    # Berjalan otomatis setiap 15 menit
-    - cron: '*/15 * * * *'
-  workflow_dispatch: # Memungkinkan tombol 'Run workflow' manual
+    # Berjalan otomatis setiap 15 menit dari Senin - Jumat (Pasar Forex)
+    - cron: '*/15 * * * 1-5'
+  workflow_dispatch: # Memungkinkan tombol 'Run workflow' manual dari GitHub UI
 
 jobs:
   run-quant-engine:
@@ -32,6 +32,10 @@ jobs:
         key: quant-state-${{ runner.os }}-${{ github.run_id }}
         restore-keys: |
           quant-state-${{ runner.os }}-
+
+    # Mencegah error 'Path Validation Error' pada cache save jika folder belum ada
+    - name: Ensure State Cache Directory Exists
+      run: mkdir -p .state_cache/
 
     - name: Execute Quant Engine Pipeline
       env:
