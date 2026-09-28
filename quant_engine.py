@@ -7,7 +7,7 @@ Features:
 1. SQLite State Persistence & Anti-Spam (.state_cache/ persistence)
 2. Multi-Feed Failover (Primary Yahoo Futures GC=F -> Secondary Spot XAUUSD=X)
 3. Monte Carlo Stress-Testing Simulation
-4. Gemini AI Gatekeeper (Fix API 404 via X-goog-api-key header)
+4. Gemini AI Gatekeeper (Native REST API with X-goog-api-key support)
 5. Telegram Dispatcher Engine
 =============================================================================
 """
@@ -171,7 +171,7 @@ class ResilientDataProvider:
 
 
 # =============================================================================
-# 4. GEMINI AI GATEKEEPER INTEGRATION (FIXED REST API AUTH)
+# 4. GEMINI AI GATEKEEPER INTEGRATION (FIXED REST API AUTH FOR AQ.KEYS)
 # =============================================================================
 class GeminiGatekeeper:
     """Modul analisis konfirmasi AI untuk validasi akhir sebelum sinyal dirilis."""
@@ -181,7 +181,7 @@ class GeminiGatekeeper:
         if not GEMINI_API_KEY:
             return "Gemini API Key tidak terkonfigurasi. Melewati analisis AI."
 
-        # Gunakan model gemini-1.5-flash dengan X-goog-api-key header
+        # Endpoint REST resmi Gemini 1.5 Flash
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
         prompt = (
@@ -202,6 +202,7 @@ class GeminiGatekeeper:
             ]
         }
 
+        # Header otentikasi resmi pendukung Google AI Studio key (AQ.Ab...)
         headers = {
             "Content-Type": "application/json",
             "X-goog-api-key": GEMINI_API_KEY
