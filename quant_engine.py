@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-XAUUSD INSTITUTIONAL QUANT ENGINE (COMPLETE PRODUCTION EDITION)
+XAUUSD AGI QUANT TRADING BOT (GRADE A+++ PRODUCTION EDITION)
 =============================================================================
-Features Included:
-1. SQLite State Persistence & Anti-Spam Auto-Recovery Engine
+Features:
+1. SQLite State Persistence & Anti-Spam (.state_cache/ persistence)
 2. Multi-Feed Failover (Primary Yahoo Futures GC=F -> Secondary Spot XAUUSD=X)
-3. Monte Carlo Simulation Engine (Stress-Testing Strategy Resilience)
-4. Gemini AI Risk & Strategy Gatekeeper Integration
-5. Operational Heartbeat & Telegram Dispatcher Engine
+3. Monte Carlo Stress-Testing Simulation
+4. Gemini AI Gatekeeper (Fix API 404 via X-goog-api-key header)
+5. Telegram Dispatcher Engine
 =============================================================================
 """
 
@@ -16,7 +16,6 @@ import os
 import sys
 import time
 import json
-import math
 import sqlite3
 import datetime
 import numpy as np
@@ -34,19 +33,23 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "").strip()
 
 MIN_CONFLUENCE_SCORE = float(os.getenv("MIN_CONFLUENCE_SCORE", "75.0"))
-COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "45"))
+COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "60"))
 FORCE_RUN = os.getenv("FORCE_RUN", "false").lower() == "true"
 
 # Disparitas spread/offset standar antara Futures GC=F dan Spot XAUUSD
 PRICE_OFFSET = 31.5
-DB_FILE = "quant_engine_state.db"
+
+# Folder cache khusus GitHub Actions
+CACHE_DIR = ".state_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+DB_FILE = os.path.join(CACHE_DIR, "quant_engine_state.db")
 
 
 # =============================================================================
-# 1. STATE PERSISTENCE & AUTO-RECOVERY ENGINE (SQLITE)
+# 1. STATE PERSISTENCE ENGINE (SQLITE)
 # =============================================================================
 class PersistenceEngine:
-    """Modul untuk menyimpan state transaksi ke SQLite agar tahan restart server/GitHub Actions."""
+    """Modul menyimpan state transaksi ke SQLite agar tahan restart server/GitHub Actions."""
 
     def __init__(self, db_path: str = DB_FILE):
         self.db_path = db_path
@@ -103,7 +106,6 @@ class MonteCarloStressTester:
     @staticmethod
     def run_simulation(trades_returns: Optional[List[float]] = None, num_simulations: int = 500, horizon: int = 50) -> Dict[str, float]:
         if not trades_returns or len(trades_returns) < 5:
-            # Baseline return distribusi historis standar XAUUSD
             trades_returns = [0.015, -0.01, 0.02, -0.01, 0.025, -0.015, 0.01, 0.03, -0.02]
 
         drawdowns = []
@@ -117,7 +119,7 @@ class MonteCarloStressTester:
         max_dd_95_conf = np.percentile(drawdowns, 95) * 100.0
         return {
             "expected_max_drawdown_95": round(float(max_dd_95_conf), 2),
-            "pass_stress_test": max_dd_95_conf < 18.0  # Batas toleransi Max Drawdown 18%
+            "pass_stress_test": max_dd_95_conf < 18.0
         }
 
 
@@ -151,7 +153,7 @@ class ResilientDataProvider:
             df["volume"] = 1000.0
         return df[["time", "open", "high", "low", "close", "volume"]].dropna()
 
-    def get_gold_candles(self, interval: str = "30m", period: str = "5d") -> Tuple[pd.DataFrame, str]:
+    def get_gold_candles(self, interval: str = "15m", period: str = "5d") -> Tuple[pd.DataFrame, str]:
         # Attempt 1: Futures GC=F
         df = self.fetch_primary("GC=F", interval, period)
         if not df.empty and len(df) >= 30:
@@ -169,7 +171,7 @@ class ResilientDataProvider:
 
 
 # =============================================================================
-# 4. GEMINI AI GATEKEEPER INTEGRATION
+# 4. GEMINI AI GATEKEEPER INTEGRATION (FIXED REST API AUTH)
 # =============================================================================
 class GeminiGatekeeper:
     """Modul analisis konfirmasi AI untuk validasi akhir sebelum sinyal dirilis."""
@@ -177,9 +179,11 @@ class GeminiGatekeeper:
     @staticmethod
     def analyze_market(direction: str, price: float, ema20: float, ema50: float, score: float) -> str:
         if not GEMINI_API_KEY:
-            return "Gemini API Key tidak terkonfigurasi. Melewati analisis AI (Bypass)."
+            return "Gemini API Key tidak terkonfigurasi. Melewati analisis AI."
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        # Gunakan model gemini-1.5-flash dengan X-goog-api-key header
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+
         prompt = (
             f"Kamu adalah Institutional Quant Trader Emas (XAUUSD).\n"
             f"Sistem teknis mendeteksi sinyal berikut:\n"
@@ -187,20 +191,31 @@ class GeminiGatekeeper:
             f"- Harga Saat Ini: {price:.2f}\n"
             f"- EMA 20: {ema20:.2f} | EMA 50: {ema50:.2f}\n"
             f"- Technical Score: {score}%\n\n"
-            f"Berikan analisis ringkas maksimal 3 kalimat: Apakah sinyal ini valid, dan apa risiko utama (misal: Liquidity Grab atau FVG) yang wajib diwaspadai?"
+            f"Berikan analisis ringkas maksimal 2 kalimat: Apakah sinyal ini valid, dan apa risiko utama (misal Liquidity Grab) yang wajib diwaspadai?"
         )
 
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [
+                {
+                    "parts": [{"text": prompt}]
+                }
+            ]
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-goog-api-key": GEMINI_API_KEY
+        }
 
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=12)
             if r.status_code == 200:
                 data = r.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            return f"Gemini API Status Code: {r.status_code}"
+            else:
+                return f"Gemini API Response Status: {r.status_code}"
         except Exception as e:
-            return f"Error menghubungi Gemini AI: {str(e)}"
+            return f"Error AI Gatekeeper: {str(e)}"
 
 
 # =============================================================================
@@ -240,13 +255,13 @@ def main():
 
     HealthMonitor.send_ping("STARTING")
 
-    # 1. Inisialisasi Database SQLite
+    # 1. Inisialisasi Database SQLite State Persistence
     db_engine = PersistenceEngine()
 
     # 2. Ambil Data Pasar via Resilient Provider
     provider = ResilientDataProvider()
     try:
-        df_m30, feed_name = provider.get_gold_candles(interval="30m", period="5d")
+        df_candles, feed_name = provider.get_gold_candles(interval="15m", period="5d")
         print(f"[Data Provider] Berhasil terhubung via: {feed_name}")
     except Exception as e:
         print(f"[Engine Abort] {e}")
@@ -263,10 +278,10 @@ def main():
         sys.exit(0)
 
     # 4. Perhitungan Indikator & Signal Scoring
-    last_close = float(df_m30["close"].iloc[-1])
-    ema20 = float(df_m30["close"].ewm(span=20).mean().iloc[-1])
-    ema50 = float(df_m30["close"].ewm(span=50).mean().iloc[-1])
-    atr = float((df_m30["high"] - df_m30["low"]).rolling(14).mean().iloc[-1])
+    last_close = float(df_candles["close"].iloc[-1])
+    ema20 = float(df_candles["close"].ewm(span=20).mean().iloc[-1])
+    ema50 = float(df_candles["close"].ewm(span=50).mean().iloc[-1])
+    atr = float((df_candles["high"] - df_candles["low"]).rolling(14).mean().iloc[-1])
 
     direction = "NEUTRAL"
     score = 0.0
@@ -294,7 +309,7 @@ def main():
         sl_price = round(last_close - sl_pips if direction == "BUY" else last_close + sl_pips, 2)
         tp_price = round(last_close + tp_pips if direction == "BUY" else last_close - tp_pips, 2)
 
-        # Analisis Tambahan AI Gemini
+        # Analisis AI Gemini
         ai_insights = GeminiGatekeeper.analyze_market(direction, last_close, ema20, ema50, score)
 
         # Simpan State ke SQLite
